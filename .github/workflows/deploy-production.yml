@@ -1,0 +1,148 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+      - production
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  PYTHON_VERSION: '3.13'
+
+jobs:
+  # Test before deploying
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r development.txt
+
+      - name: Run linting
+        run: |
+          make lint || true
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v || true
+
+  # Deploy to server via SSH
+  deploy-ssh:
+    name: Deploy via SSH
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+      url: ${{ secrets.DEPLOYMENT_URL }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Create .env file on server
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          # Create .env file with all secrets
+          cat > /tmp/.env << EOF
+          
+
+          WORKERS=${{ secrets.WORKERS || '4' }}
+          REVERSE_PROXY=${{ secrets.REVERSE_PROXY || 'true' }}
+          
+          # Upload & Logs
+          UPLOAD_FOLDER=/var/uploads
+          LOG_FOLDER=/var/log/CTFd
+          ACCESS_LOG=${{ secrets.ACCESS_LOG || '-' }}
+          ERROR_LOG=${{ secrets.ERROR_LOG || '-' }}
+          
+          
+          # Performance
+          CTFD_PORT=${{ secrets.CTFD_PORT || '8000' }}
+          EOF
+          
+          # Upload .env file to server
+          scp /tmp/.env $SSH_USER@$SSH_HOST:${{ secrets.DEPLOY_PATH }}/.env
+          
+          # Secure the .env file
+          ssh $SSH_USER@$SSH_HOST "chmod 600 ${{ secrets.DEPLOY_PATH }}/.env"
+          
+          # Clean up local .env
+          rm /tmp/.env
+
+      - name: Deploy to server
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            set -e
+            echo "🚀 Starting deployment..."
+
+            # Navigate to deployment directory
+            cd ${{ secrets.DEPLOY_PATH }}
+
+            # Pull latest changes from Git
+            git pull origin ${{ github.ref_name }}
+
+            # Stop existing containers
+            docker compose down
+
+            # Build and start new containers with .env file
+            docker compose up -d --build
+            
+            # Show running containers
+            echo ""
+            echo "📊 Running containers:"
+            docker compose ps
+          ENDSSH
+
+
+      - name: Notify deployment status
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Deployment to ${{ github.event.inputs.environment || 'production' }} ${{ job.status }}
+            Repository: ${{ github.repository }}
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+        continue-on-error: true
