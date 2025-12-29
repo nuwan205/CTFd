@@ -22,7 +22,9 @@ env:
   PYTHON_VERSION: '3.13'
 
 jobs:
-  # Test before deploying
+  # ----------------------------
+  # Test job
+  # ----------------------------
   test:
     name: Run Tests
     runs-on: ubuntu-latest
@@ -43,14 +45,14 @@ jobs:
           pip install -r development.txt
 
       - name: Run linting
-        run: |
-          make lint || true
+        run: make lint || true
 
       - name: Run tests
-        run: |
-          pytest tests/ -v || true
+        run: pytest tests/ -v || true
 
-  # Deploy to server via SSH
+  # ----------------------------
+  # Deploy via SSH
+  # ----------------------------
   deploy-ssh:
     name: Deploy via SSH
     needs: test
@@ -59,11 +61,12 @@ jobs:
     environment:
       name: ${{ github.event.inputs.environment || 'production' }}
       url: ${{ secrets.DEPLOYMENT_URL }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup SSH
+      - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -73,39 +76,38 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
 
+      # ----------------------------
+      # Create .env on server
+      # ----------------------------
       - name: Create .env file on server
         env:
           SSH_USER: ${{ secrets.SSH_USER }}
           SSH_HOST: ${{ secrets.SSH_HOST }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
-          # Create .env file with all secrets
-          cat > /tmp/.env << EOF
-          
+          cat > /tmp/.env << 'EOF'
+          # CTFd
+          DATABASE_URL=${{ secrets.DATABASE_URL }}
+          REDIS_URL=${{ secrets.REDIS_URL }}
 
-          WORKERS=${{ secrets.WORKERS || '4' }}
-          REVERSE_PROXY=${{ secrets.REVERSE_PROXY || 'true' }}
-          
-          # Upload & Logs
+          WORKERS=4
+          REVERSE_PROXY=true
+
           UPLOAD_FOLDER=/var/uploads
           LOG_FOLDER=/var/log/CTFd
-          ACCESS_LOG=${{ secrets.ACCESS_LOG || '-' }}
-          ERROR_LOG=${{ secrets.ERROR_LOG || '-' }}
-          
-          
-          # Performance
-          CTFD_PORT=${{ secrets.CTFD_PORT || '8000' }}
+          ACCESS_LOG=-
+          ERROR_LOG=-
+
+          CTFD_PORT=8000
           EOF
-          
-          # Upload .env file to server
-          scp /tmp/.env $SSH_USER@$SSH_HOST:${{ secrets.DEPLOY_PATH }}/.env
-          
-          # Secure the .env file
-          ssh $SSH_USER@$SSH_HOST "chmod 600 ${{ secrets.DEPLOY_PATH }}/.env"
-          
-          # Clean up local .env
+
+          scp /tmp/.env $SSH_USER@$SSH_HOST:$DEPLOY_PATH/.env
+          ssh $SSH_USER@$SSH_HOST "chmod 600 $DEPLOY_PATH/.env"
           rm /tmp/.env
 
+      # ----------------------------
+      # Deploy
+      # ----------------------------
       - name: Deploy to server
         env:
           SSH_USER: ${{ secrets.SSH_USER }}
@@ -114,35 +116,32 @@ jobs:
         run: |
           ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
             set -e
-            echo "🚀 Starting deployment..."
 
-            # Navigate to deployment directory
-            cd ${{ secrets.DEPLOY_PATH }}
+            cd $DEPLOY_PATH
 
-            # Pull latest changes from Git
-            git pull origin ${{ github.ref_name }}
+            echo "📥 Updating code..."
+            git fetch --all
+            git checkout main
+            git pull
 
-            # Stop existing containers
+            echo "🛑 Stopping containers..."
             docker compose down
 
-            # Build and start new containers with .env file
+            echo "🚀 Starting containers..."
             docker compose up -d --build
-            
-            # Show running containers
-            echo ""
-            echo "📊 Running containers:"
+
+            echo "🗄 Running database migrations..."
+            docker compose exec -T ctfd flask db upgrade
+
+            echo "📊 Containers status:"
             docker compose ps
           ENDSSH
 
+      # ----------------------------
+      # Health check
+      # ----------------------------
+      - name: Health check
+        run: |
+          sleep 5
+          curl -f ${{ secrets.DEPLOYMENT_URL }} || echo "⚠️ Health check failed"
 
-      - name: Notify deployment status
-        if: always()
-        uses: 8398a7/action-slack@v3
-        with:
-          status: ${{ job.status }}
-          text: |
-            Deployment to ${{ github.event.inputs.environment || 'production' }} ${{ job.status }}
-            Repository: ${{ github.repository }}
-            Commit: ${{ github.sha }}
-            Author: ${{ github.actor }}
-        continue-on-error: true
