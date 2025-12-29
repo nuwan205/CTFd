@@ -60,7 +60,6 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     environment:
       name: ${{ github.event.inputs.environment || 'production' }}
-      url: ${{ secrets.DEPLOYMENT_URL }}
 
     steps:
       - name: Checkout code
@@ -144,4 +143,3 @@ jobs:
         run: |
           sleep 5
           curl -f ${{ secrets.DEPLOYMENT_URL }} || echo "⚠️ Health check failed"
-
