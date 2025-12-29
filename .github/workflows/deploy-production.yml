@@ -10,34 +10,30 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Deployment environment'
+        description: Deployment environment
         required: true
-        default: 'production'
+        default: production
         type: choice
         options:
           - production
           - staging
 
-env:
-  PYTHON_VERSION: '3.13'
-
 jobs:
-
-  # ----------------------------
-  # Deploy via SSH
-  # ----------------------------
   deploy-ssh:
     name: Deploy via SSH
-    needs: test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    environment:
-      name: ${{ github.event.inputs.environment || 'production' }}
 
     steps:
+      # ----------------------------
+      # Checkout
+      # ----------------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # ----------------------------
+      # SSH setup (NO passphrase)
+      # ----------------------------
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -74,45 +70,4 @@ jobs:
           EOF
 
           scp /tmp/.env $SSH_USER@$SSH_HOST:$DEPLOY_PATH/.env
-          ssh $SSH_USER@$SSH_HOST "chmod 600 $DEPLOY_PATH/.env"
-          rm /tmp/.env
-
-      # ----------------------------
-      # Deploy
-      # ----------------------------
-      - name: Deploy to server
-        env:
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        run: |
-          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
-            set -e
-
-            cd $DEPLOY_PATH
-
-            echo "📥 Updating code..."
-            git fetch --all
-            git checkout main
-            git pull
-
-            echo "🛑 Stopping containers..."
-            docker compose down
-
-            echo "🚀 Starting containers..."
-            docker compose up -d --build
-
-            echo "🗄 Running database migrations..."
-            docker compose exec -T ctfd flask db upgrade
-
-            echo "📊 Containers status:"
-            docker compose ps
-          ENDSSH
-
-      # ----------------------------
-      # Health check
-      # ----------------------------
-      - name: Health check
-        run: |
-          sleep 5
-          curl -f ${{ secrets.DEPLOYMENT_URL }} || echo "⚠️ Health check failed"
+          ssh $S
